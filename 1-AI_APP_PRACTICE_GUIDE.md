@@ -225,6 +225,8 @@ def cosine_similarity(vector_a, vector_b):
   -> 页面显示回答
 ```
 
+可以借助 AI，建议提示词：“帮我基于阿里千问大模型搭建一个极简单网站，一个大模型chatbot。使用fastapi，后端调用大模型。代码目录结构仅包含static/index.html、app.py、requirements.txt、README.md”
+
 ### 4.1 项目结构
 
 建议目录：
