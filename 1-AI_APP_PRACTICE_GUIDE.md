@@ -5,6 +5,7 @@
 - 能用 Python 调用 Embedding API
 - 能进行向量相似度计算，检索相似句
 - 能本地运行 Web 聊天机器人
+- 能实现基于 RAG 的知识库问答机器人
 - 能部署到 Railway，通过公网地址访问网站
 
 
@@ -41,7 +42,7 @@ git --version
 
 ### 0.2 需要准备的 API Key
 
-本课程主要使用阿里云百炼-通义千问系列模型及 DeepSeek 模型。 需要准备：
+本实践主要使用阿里云百炼-通义千问系列模型及 DeepSeek 模型。 需要准备：
 
 ```text
 DASHSCOPE_API_KEY
@@ -225,8 +226,6 @@ def cosine_similarity(vector_a, vector_b):
   -> 页面显示回答
 ```
 
-可以借助 AI，建议提示词：“帮我基于阿里千问大模型搭建一个极简单网站，一个大模型chatbot。使用fastapi，后端调用大模型。代码目录结构仅包含static/index.html、app.py、requirements.txt、README.md”
-
 ### 4.1 项目结构
 
 建议目录：
@@ -271,7 +270,234 @@ python3 -m uvicorn app:app --reload
 http://127.0.0.1:8000
 ```
 
-## 5. 部署到 Railway
+## 5. 实践任务：基于 RAG 的知识库问答机器人
+
+前面的 Web 聊天机器人可以调用大模型回答问题，但它还不知道企业自己的资料。比如企业套餐价格、退款规则、发票政策、售后政策等信息，如果没有提供给模型，模型可能会泛泛而谈，甚至编造答案。
+
+本实践任务要实现一个基于 RAG 的知识库问答机器人，让模型先检索企业知识库，再基于检索到的资料回答。
+
+RAG 的全称是 Retrieval-Augmented Generation，中文通常叫“检索增强生成”。
+
+整体流程：
+
+```text
+企业知识库
+  -> 切分成多个知识片段
+  -> 调用 Embedding 模型生成向量
+
+用户问题
+  -> 调用 Embedding 模型生成问题向量
+  -> 计算问题向量和知识片段向量的相似度
+  -> 取最相关的几个知识片段
+  -> 把知识片段和用户问题一起交给大模型
+  -> 大模型基于资料生成回答
+```
+
+### 5.1 任务目标
+
+完成一个 Python 脚本，实现：
+
+- 读取企业知识库文件
+- 将知识库切分成多个片段
+- 调用 Embedding API 生成知识库向量
+- 对用户问题生成向量
+- 计算相似度，检索最相关的知识片段
+- 将检索结果和用户问题交给大模型
+- 输出最终回答
+
+本任务先不做网站，只在终端运行，这样更容易理解 RAG 的基本原理。
+
+### 5.2 项目结构
+
+建议新建目录：
+
+```text
+rag-demo/
+  rag_demo.py
+  knowledge.txt
+  requirements.txt
+```
+
+`requirements.txt`：
+
+```text
+openai>=1.30.0
+numpy>=1.26.0
+```
+
+安装依赖：
+
+```bash
+pip3 install -r requirements.txt
+```
+
+### 5.3 准备企业知识库
+
+新建 `knowledge.txt`：
+
+```text
+【公司介绍】
+星河科技有限公司是一家面向中小企业提供智能客服、知识库问答和数据分析工具的软件公司。
+
+【产品套餐】
+星河智能客服目前有三个套餐。基础版价格为每月 99 元，适合个人和小团队使用。专业版价格为每月 299 元，适合成长型企业使用。企业版需要联系销售定制报价。
+
+【发票政策】
+用户付款成功后，可以在后台的“费用中心”申请电子发票。普通发票通常会在 1 个工作日内开具，专用发票通常会在 3 个工作日内开具。
+
+【退款规则】
+月付套餐购买后 7 天内，如果 AI 问答使用量少于 50 次，可以申请退款。超过 7 天或使用量达到 50 次及以上，不支持退款。
+
+【人工客服】
+如果智能客服无法解决问题，用户可以通过官网右下角的在线客服入口联系人工客服。人工客服工作时间为周一至周五 9:00-18:00。
+```
+
+注意：不同知识片段之间用空行隔开，方便程序切分。
+
+### 5.4 核心代码思路
+
+读取知识库：
+
+```python
+from pathlib import Path
+
+KNOWLEDGE_FILE = Path("knowledge.txt")
+
+def load_knowledge():
+    text = KNOWLEDGE_FILE.read_text(encoding="utf-8")
+    chunks = []
+    for block in text.split("\n\n"):
+        chunk = block.strip()
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+```
+
+调用 Embedding 模型：
+
+```python
+def get_embeddings(client, texts):
+    response = client.embeddings.create(
+        model="text-embedding-v4",
+        input=texts,
+    )
+    return [item.embedding for item in response.data]
+```
+
+计算相似度：
+
+```python
+import numpy as np
+
+def cosine_similarity(vector_a, vector_b):
+    vector_a = np.array(vector_a)
+    vector_b = np.array(vector_b)
+    return np.dot(vector_a, vector_b) / (
+        np.linalg.norm(vector_a) * np.linalg.norm(vector_b)
+    )
+```
+
+检索最相关知识片段：
+
+```python
+def search_knowledge(client, query, chunks, chunk_vectors, top_k=3):
+    query_vector = get_embeddings(client, [query])[0]
+
+    scored_chunks = []
+    for chunk, chunk_vector in zip(chunks, chunk_vectors):
+        score = cosine_similarity(query_vector, chunk_vector)
+        scored_chunks.append((float(score), chunk))
+
+    scored_chunks.sort(reverse=True, key=lambda item: item[0])
+    return scored_chunks[:top_k]
+```
+
+把检索结果交给大模型：
+
+```python
+def answer_with_rag(client, query, search_results):
+    context_parts = []
+    for index, (score, chunk) in enumerate(search_results, start=1):
+        context_parts.append(f"[资料{index}，相似度 {score:.4f}]\n{chunk}")
+
+    context = "\n\n".join(context_parts)
+
+    system_prompt = """
+你是企业智能客服。
+你必须根据企业知识库资料回答用户问题。
+如果资料中没有答案，请说明“知识库中暂未找到相关信息，需要人工客服进一步处理”。
+回答要礼貌、简洁、专业，不要编造资料中没有的信息。
+"""
+
+    user_prompt = f"""
+请根据下面的企业知识库资料回答用户问题。
+
+企业知识库资料：
+{context}
+
+用户问题：
+{query}
+"""
+
+    completion = client.chat.completions.create(
+        model="qwen-plus",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.2,
+    )
+
+    return completion.choices[0].message.content
+```
+
+### 5.5 运行测试
+
+建议测试这些问题：
+
+```text
+专业版多少钱？
+```
+
+```text
+如何申请发票？
+```
+
+```text
+超过 7 天还能退款吗？
+```
+
+```text
+人工客服什么时候在线？
+```
+
+运行后，程序应该打印：
+
+- 知识库片段数量
+- 向量维度
+- 检索到的前 3 条资料
+- 大模型最终回答
+
+### 5.6 验收要求
+
+学生需要提交：
+
+```text
+1. rag_demo.py
+2. knowledge.txt
+3. 运行截图
+4. 至少 3 个测试问题和回答结果
+5. 简要说明 RAG 的流程
+```
+
+要求能够解释：
+
+- 为什么要使用 Embedding
+- 相似度的作用是什么
+- 为什么要把检索到的资料放进 prompt
+- 如果知识库没有答案，模型应该怎么回答
+
+## 6. 部署到 Railway
 
 GitHub Pages 和 Surge.sh 只能部署静态网页，不能运行 FastAPI 后端。
 
@@ -283,11 +509,11 @@ HTML 前端 + FastAPI 后端 + 大模型 API 调用
 
 所以需要 Railway 这类可以运行后端服务的平台。
 
-## 5.1 Railway 部署版项目结构
+## 6.1 Railway 部署版项目结构
 
 可以直接复制压缩包代码。
 
-## 5.2 上传到 GitHub
+## 6.2 上传到 GitHub
 
 进入项目目录：
 
@@ -322,7 +548,7 @@ GitHub Token 页面：
 https://github.com/settings/tokens
 ```
 
-## 5.3 在 Railway 部署
+## 6.3 在 Railway 部署
 
 1. 打开 [Railway](https://railway.com/)。
 2. 使用 GitHub 登录。
@@ -333,7 +559,7 @@ https://github.com/settings/tokens
 
 第一次部署可能失败，因为还没有配置环境变量。继续下一步。
 
-## 5.4 配置 Railway 环境变量
+## 6.4 配置 Railway 环境变量
 
 进入 Railway 项目中的具体服务，找到：
 
@@ -357,7 +583,7 @@ DASHSCOPE_API_KEY=sk-你的阿里云百炼APIKey
 
 配置完变量后，重新部署。
 
-## 5.5 生成公网域名
+## 6.5 生成公网域名
 
 部署成功后，Railway 会生成一个公网地址，例如：
 
@@ -367,9 +593,9 @@ https://class2-railway-production.up.railway.app
 
 打开这个地址，就可以访问你的网站。
 
-## 6. Railway 常见问题
+## 7. Railway 常见问题
 
-### 6.1 页面能打开，但聊天提示没有读取到环境变量
+### 7.1 页面能打开，但聊天提示没有读取到环境变量
 
 错误类似：
 
@@ -388,7 +614,7 @@ DASHSCOPE_API_KEY
 2. 配置后是否进行了重新部署。
 
 
-## 7. 实践任务清单
+## 8. 实践任务清单
 
 基础任务：
 
@@ -396,6 +622,7 @@ DASHSCOPE_API_KEY
 - 能用 Python 调用 Embedding API
 - 能进行向量相似度计算，检索相似句
 - 能本地运行 Web 聊天机器人
+- 能实现基于 RAG 的知识库问答机器人
 - 能部署到 Railway，通过公网地址访问网站
 
 提高任务：
@@ -403,3 +630,4 @@ DASHSCOPE_API_KEY
 - 优化网页样式
 - 支持 DeepSeek / 千问切换
 - 增加多轮对话
+- 把 RAG 知识库问答机器人接入 Web 网站
